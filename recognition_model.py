@@ -1,15 +1,29 @@
 import os
 import sys
+import random
 import numpy as np
 import logging
 import subprocess
-from ctcdecode import CTCBeamDecoder
+from torchaudio.models.decoder import ctc_decoder
 import jiwer
 import tqdm
 
 import torch
 from torch import nn
 import torch.nn.functional as F
+
+SEED = 42
+
+
+def set_seed(seed=SEED):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    os.environ['PYTHONHASHSEED'] = str(seed)
 
 from read_emg import EMGDataset, SizeAwareSampler
 from architecture import Model
@@ -26,15 +40,34 @@ flags.DEFINE_integer('learning_rate_patience', 5, 'learning rate decay patience'
 flags.DEFINE_string('start_training_from', None, 'start training from this model')
 flags.DEFINE_float('l2', 0, 'weight decay')
 flags.DEFINE_string('evaluate_saved', None, 'run evaluation on given model file')
+flags.DEFINE_string('lm_directory', 'KenLM', 'directory with lexicon and LM files')
 
-def test(model, testset, device):
+
+def worker_init_fn(worker_id):
+    """Initialize worker seeds for DataLoader reproducibility."""
+    worker_seed = FLAGS.seed + worker_id
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
+
+def test(model, testset, device, beam_size=150):
     model.eval()
 
-    blank_id = len(testset.text_transform.chars)
-    decoder = CTCBeamDecoder(testset.text_transform.chars+'_', blank_id=blank_id, log_probs_input=True,
-            model_path='lm.binary', alpha=1.5, beta=1.85)
+    tkns = [c for c in testset.text_transform.chars] + ["_"]
+    decoder = ctc_decoder(
+        lexicon=os.path.join(FLAGS.lm_directory, "gaddy_lexicon.txt"),
+        tokens=tkns,
+        lm=os.path.join(FLAGS.lm_directory, "lm.bin"),
+        blank_token="_",
+        sil_token="|",
+        nbest=1,
+        lm_weight=1.5,
+        word_score=1.85,
+        beam_size=beam_size,
+    )
 
-    dataloader = torch.utils.data.DataLoader(testset, batch_size=1)
+    dataloader = torch.utils.data.DataLoader(testset, batch_size=1, worker_init_fn=lambda x: worker_init_fn(x))
     references = []
     predictions = []
     with torch.no_grad():
@@ -43,12 +76,11 @@ def test(model, testset, device):
             X_raw = example['raw_emg'].to(device)
             sess = example['session_ids'].to(device)
 
-            pred  = F.log_softmax(model(X, X_raw, sess), -1)
+            pred = F.log_softmax(model(X, X_raw, sess), dim=-1)
 
-            beam_results, beam_scores, timesteps, out_lens = decoder.decode(pred)
-            pred_int = beam_results[0,0,:out_lens[0,0]].tolist()
+            beam_results = decoder(pred.detach().cpu())
+            pred_text = " ".join(beam_results[0][0].words).strip()
 
-            pred_text = testset.text_transform.int_to_text(pred_int)
             target_text = testset.text_transform.clean_text(example['text'][0])
 
             references.append(target_text)
@@ -59,7 +91,7 @@ def test(model, testset, device):
 
 
 def train_model(trainset, devset, device, n_epochs=200):
-    dataloader = torch.utils.data.DataLoader(trainset, pin_memory=(device=='cuda'), num_workers=0, collate_fn=EMGDataset.collate_raw, batch_sampler=SizeAwareSampler(trainset, 128000))
+    dataloader = torch.utils.data.DataLoader(trainset, pin_memory=(device=='cuda'), num_workers=0, collate_fn=EMGDataset.collate_raw, batch_sampler=SizeAwareSampler(trainset, 128000), worker_init_fn=lambda x: worker_init_fn(x))
 
 
     n_chars = len(devset.text_transform.chars)
@@ -117,6 +149,7 @@ def train_model(trainset, devset, device, n_epochs=200):
     return model
 
 def evaluate_saved():
+    set_seed()
     device = 'cuda' if torch.cuda.is_available() and not FLAGS.debug else 'cpu'
     testset = EMGDataset(test=True)
     n_chars = len(testset.text_transform.chars)
@@ -125,6 +158,7 @@ def evaluate_saved():
     print('WER:', test(model, testset, device))
 
 def main():
+    set_seed()
     os.makedirs(FLAGS.output_directory, exist_ok=True)
     logging.basicConfig(handlers=[
             logging.FileHandler(os.path.join(FLAGS.output_directory, 'log.txt'), 'w'),

@@ -243,7 +243,7 @@ def read_phonemes(textgrid_fname, max_len=None):
 class TextTransform(object):
     def __init__(self):
         self.transformation = jiwer.Compose([jiwer.RemovePunctuation(), jiwer.ToLowerCase()])
-        self.chars = string.ascii_lowercase+string.digits+' '
+        self.chars = string.ascii_lowercase+string.digits+'|'
 
     def clean_text(self, text):
         text = unidecode(text)
@@ -252,6 +252,7 @@ class TextTransform(object):
 
     def text_to_int(self, text):
         text = self.clean_text(text)
+        text = text.replace(' ', '|')
         return [self.chars.index(c) for c in text]
 
     def int_to_text(self, ints):
