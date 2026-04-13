@@ -3,7 +3,7 @@ import sys
 import numpy as np
 import logging
 import subprocess
-
+import random
 import soundfile as sf
 import tqdm
 
@@ -19,6 +19,28 @@ from vocoder import Vocoder
 
 from absl import flags
 FLAGS = flags.FLAGS
+
+
+
+def set_seed(seed):
+    """Set all random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+
+
+def worker_init_fn(worker_id):
+    """Initialize worker seeds for DataLoader reproducibility."""
+    worker_seed = FLAGS.seed + worker_id
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
 flags.DEFINE_integer('batch_size', 32, 'training batch size')
 flags.DEFINE_integer('epochs', 80, 'number of training epochs')
 flags.DEFINE_float('learning_rate', 1e-3, 'learning rate')
@@ -29,11 +51,12 @@ flags.DEFINE_float('data_size_fraction', 1.0, 'fraction of training data to use'
 flags.DEFINE_float('phoneme_loss_weight', 0.5, 'weight of auxiliary phoneme prediction loss')
 flags.DEFINE_float('l2', 1e-7, 'weight decay')
 flags.DEFINE_string('output_directory', 'output', 'output directory')
+flags.DEFINE_integer("seed", 42, "random seed for reproducibility")
 
 def test(model, testset, device):
     model.eval()
 
-    dataloader = torch.utils.data.DataLoader(testset, batch_size=32, collate_fn=testset.collate_raw)
+    dataloader = torch.utils.data.DataLoader(testset, batch_size=32, collate_fn=testset.collate_raw, worker_init_fn=lambda x: worker_init_fn(x), num_workers=8)
     losses = []
     accuracies = []
     phoneme_confusion = np.zeros((len(phoneme_inventory),len(phoneme_inventory)))
@@ -163,10 +186,10 @@ def train_model(trainset, devset, device, save_sound_outputs=True):
         training_subset = trainset
     else:
         training_subset = trainset.subset(FLAGS.data_size_fraction)
-    dataloader = torch.utils.data.DataLoader(training_subset, pin_memory=(device=='cuda'), collate_fn=devset.collate_raw, num_workers=0, batch_sampler=SizeAwareSampler(training_subset, 256000))
+    dataloader = torch.utils.data.DataLoader(training_subset, pin_memory=(device=='cuda'), collate_fn=devset.collate_raw, num_workers=8, worker_init_fn=lambda x: worker_init_fn(x), batch_sampler=SizeAwareSampler(training_subset, 256000, seed=FLAGS.seed))
 
     n_phones = len(phoneme_inventory)
-    model = Model(devset.num_features, devset.num_speech_features, n_phones).to(device)
+    model = Model(devset.num_features, devset.num_speech_features, n_phones, seed=FLAGS.seed).to(device)
 
     if FLAGS.start_training_from is not None:
         state_dict = torch.load(FLAGS.start_training_from)
@@ -193,6 +216,9 @@ def train_model(trainset, devset, device, save_sound_outputs=True):
     batch_idx = 0
     for epoch_idx in range(n_epochs):
         losses = []
+        # Create a directory for this epoch's outputs
+        epoch_output_dir = os.path.join(FLAGS.output_directory, f'epoch_{epoch_idx}')
+        os.makedirs(epoch_output_dir, exist_ok=True)
         for batch in tqdm.tqdm(dataloader, 'Train step', disable=None):
             optim.zero_grad()
             schedule_lr(batch_idx)
@@ -201,7 +227,11 @@ def train_model(trainset, devset, device, save_sound_outputs=True):
             X_raw = combine_fixed_length([t.to(device, non_blocking=True) for t in batch['raw_emg']], seq_len*8)
             sess = combine_fixed_length([t.to(device, non_blocking=True) for t in batch['session_ids']], seq_len)
 
+            # Save the x_raw to disk for debugging
+            torch.save(X_raw.cpu(), os.path.join(epoch_output_dir, f'X_raw_epoch{epoch_idx}_batch{batch_idx}.pt'))
             pred, phoneme_pred = model(X, X_raw, sess)
+            torch.save(pred.cpu(), os.path.join(epoch_output_dir, f'pred_epoch{epoch_idx}_batch{batch_idx}.pt'))
+            torch.save(phoneme_pred.cpu(), os.path.join(epoch_output_dir, f'phoneme_pred_epoch{epoch_idx}_batch{batch_idx}.pt'))
 
             loss, _ = dtw_loss(pred, phoneme_pred, batch)
             losses.append(loss.item())
@@ -227,16 +257,18 @@ def train_model(trainset, devset, device, save_sound_outputs=True):
     return model
 
 def main():
+    set_seed(FLAGS.seed)
     os.makedirs(FLAGS.output_directory, exist_ok=True)
     logging.basicConfig(handlers=[
             logging.FileHandler(os.path.join(FLAGS.output_directory, 'log.txt'), 'w'),
             logging.StreamHandler()
             ], level=logging.INFO, format="%(message)s")
 
-    logging.info(subprocess.run(['git','rev-parse','HEAD'], stdout=subprocess.PIPE, universal_newlines=True).stdout)
-    logging.info(subprocess.run(['git','diff'], stdout=subprocess.PIPE, universal_newlines=True).stdout)
+    # logging.info(subprocess.run(['git','rev-parse','HEAD'], stdout=subprocess.PIPE, universal_newlines=True).stdout)
+    # logging.info(subprocess.run(['git','diff'], stdout=subprocess.PIPE, universal_newlines=True).stdout)
 
     logging.info(sys.argv)
+    logging.info(f"Using random seed: {FLAGS.seed}")
 
     trainset = EMGDataset(dev=False,test=False)
     devset = EMGDataset(dev=True)

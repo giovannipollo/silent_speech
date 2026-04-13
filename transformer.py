@@ -79,6 +79,8 @@ class MultiHeadAttention(nn.Module):
 
     self.dropout = nn.Dropout(dropout)
 
+    self.batch_first = False
+    
     if relative_positional:
         self.relative_positional = LearnedRelativePositionalEmbedding(relative_positional_distance, n_head, d_qkv, True)
     else:

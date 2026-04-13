@@ -1,5 +1,5 @@
 import random
-
+import torch
 from torch import nn
 import torch.nn.functional as F
 
@@ -40,8 +40,10 @@ class ResBlock(nn.Module):
         return F.relu(x + res)
 
 class Model(nn.Module):
-    def __init__(self, num_features, num_outs, num_aux_outs=None):
+    def __init__(self, num_features, num_outs, num_aux_outs=None, seed=None):
         super().__init__()
+        self.seed = seed
+        self.rng = random.Random(seed) if seed is not None else random
 
         self.conv_blocks = nn.Sequential(
             ResBlock(8, FLAGS.model_size, 2),
@@ -62,10 +64,10 @@ class Model(nn.Module):
         # x shape is (batch, time, electrode)
 
         if self.training:
-            r = random.randrange(8)
+            r = self.rng.randrange(8)
             if r > 0:
-                x_raw[:,:-r,:] = x_raw[:,r:,:] # shift left r
-                x_raw[:,-r:,:] = 0
+                x_raw = x_raw.clone()  # Clone to avoid in-place modification issues
+                x_raw = torch.cat([x_raw[:, r:, :], torch.zeros_like(x_raw[:, :r, :])], dim=1)
 
         x_raw = x_raw.transpose(1,2) # put channel before time for conv
         x_raw = self.conv_blocks(x_raw)

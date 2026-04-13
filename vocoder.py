@@ -1,11 +1,15 @@
 import os
 import json
-import sys
 import numpy as np
 
 import torch
 
-sys.path.append('./hifi_gan')
+import sys
+
+# Ensure the local ./hifi_gan directory is preferred on sys.path so the
+# project's copies of `models`, `utils`, `env`, etc. are imported instead
+# of any other packages named the same elsewhere on sys.path.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'hifi_gan'))
 from env import AttrDict
 from models import Generator
 
