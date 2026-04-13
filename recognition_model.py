@@ -91,7 +91,7 @@ def test(model, testset, device, beam_size=150):
 
 
 def train_model(trainset, devset, device, n_epochs=200):
-    dataloader = torch.utils.data.DataLoader(trainset, pin_memory=(device=='cuda'), num_workers=0, collate_fn=EMGDataset.collate_raw, batch_sampler=SizeAwareSampler(trainset, 128000), worker_init_fn=lambda x: worker_init_fn(x))
+    dataloader = torch.utils.data.DataLoader(trainset, pin_memory=(device=='cuda'), num_workers=0, collate_fn=EMGDataset.collate_raw, batch_sampler=SizeAwareSampler(trainset, 128000, seed=SEED), worker_init_fn=lambda x: worker_init_fn(x))
 
 
     n_chars = len(devset.text_transform.chars)
