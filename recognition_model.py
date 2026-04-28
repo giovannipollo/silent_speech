@@ -95,7 +95,7 @@ def train_model(trainset, devset, device, n_epochs=200):
 
 
     n_chars = len(devset.text_transform.chars)
-    model = Model(devset.num_features, n_chars+1).to(device)
+    model = Model(devset.num_features, n_chars+1, seed=SEED).to(device)
 
     if FLAGS.start_training_from is not None:
         state_dict = torch.load(FLAGS.start_training_from, map_location=torch.device(device))
@@ -153,7 +153,7 @@ def evaluate_saved():
     device = 'cuda' if torch.cuda.is_available() and not FLAGS.debug else 'cpu'
     testset = EMGDataset(test=True)
     n_chars = len(testset.text_transform.chars)
-    model = Model(testset.num_features, n_chars+1).to(device)
+    model = Model(testset.num_features, n_chars+1, seed=SEED).to(device)
     model.load_state_dict(torch.load(FLAGS.evaluate_saved, map_location=torch.device(device)))
     print('WER:', test(model, testset, device))
 
